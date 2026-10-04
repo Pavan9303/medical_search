@@ -32,16 +32,20 @@ def _fetch_tokens_via_browser() -> dict:
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-setuid-sandbox",
-                  "--disable-gpu", "--single-process"],
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-setuid-sandbox", "--disable-gpu"],
         )
         ctx = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         )
         page = ctx.new_page()
         page.on("request", on_request)
-        page.goto(PORTAL_URL, wait_until="networkidle", timeout=30000)
-        page.wait_for_timeout(5000)
+        page.goto(PORTAL_URL, wait_until="domcontentloaded", timeout=30000)
+        # Wait until the portal's auth API call fires (up to 25s)
+        try:
+            page.wait_for_request(lambda r: "uma/sessions" in r.url or "drug-attributes" in r.url, timeout=25000)
+            page.wait_for_timeout(3000)  # let subsequent auth requests arrive
+        except Exception:
+            page.wait_for_timeout(5000)  # fallback
         browser.close()
 
     print(f"[token] intercepted {len(all_urls)} requests, keys: {list(captured.keys())}", flush=True)
