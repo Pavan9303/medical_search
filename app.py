@@ -5,9 +5,12 @@ import time
 import threading
 import httpx
 from contextlib import asynccontextmanager
+from dotenv import load_dotenv
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
+
+load_dotenv()
 
 BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
 ABDM_BASE    = "https://drugregistrysbx.abdm.gov.in/drug-registry/v1"
@@ -66,15 +69,13 @@ async def _find_js_bundle_path(c: httpx.AsyncClient, h: dict) -> str:
 
 async def _fetch_tokens_via_http() -> dict:
     """
-    1. Get apikey: from APIKEY env var (Render), or by scraping the portal JS bundle.
-    2. GET /uma/sessions with that apikey → returns accessToken (bearer).
+    If APIKEY env var is set: call /uma/sessions directly (1 request, no bundle download).
+    Otherwise: scrape the portal JS bundle to extract the apikey first.
     """
     h = {"User-Agent": UA, "Accept": "application/json,text/html,*/*"}
 
     async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=h) as c:
-        # Fast path: use env var apikey (set on Render to bypass geo-blocked portal)
         if _ENV_APIKEY:
-            print("[token] Using APIKEY env var — skipping portal fetch", flush=True)
             api_key = _ENV_APIKEY
         else:
             js_path = await _find_js_bundle_path(c, h)
@@ -87,7 +88,6 @@ async def _fetch_tokens_via_http() -> dict:
                 return {}
             api_key = key_m.group(1)
 
-        # GET /uma/sessions → { "accessToken": "eyJ..." }
         sess = await c.get(
             f"{PORTAL_BASE}/drug-registry/v1/uma/sessions",
             headers={**h, "Apikey": api_key},
