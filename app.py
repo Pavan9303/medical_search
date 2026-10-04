@@ -19,22 +19,32 @@ _lock = threading.Lock()
 
 def _fetch_tokens_via_browser() -> dict:
     captured = {}
+    all_urls = []
 
     def on_request(req):
+        all_urls.append(req.url)
         h = req.headers
         if "apikey" in h and "api_key" not in captured:
             captured["api_key"] = h["apikey"]
         if "authorization" in h and "bearer" not in captured:
-            captured["bearer"] = h["authorization"]  # includes "Bearer " prefix
+            captured["bearer"] = h["authorization"]
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-        page = browser.new_page()
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-setuid-sandbox",
+                  "--disable-gpu", "--single-process"],
+        )
+        ctx = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        )
+        page = ctx.new_page()
         page.on("request", on_request)
-        page.goto(PORTAL_URL)
-        page.wait_for_timeout(8000)
+        page.goto(PORTAL_URL, wait_until="networkidle", timeout=30000)
+        page.wait_for_timeout(5000)
         browser.close()
 
+    print(f"[token] intercepted {len(all_urls)} requests, keys: {list(captured.keys())}", flush=True)
     return captured
 
 
