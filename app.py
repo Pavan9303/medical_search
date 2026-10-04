@@ -254,3 +254,11 @@ async def get_substance(substance_id: str):
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "token_age_seconds": round(time.time() - _token["fetched_at"]), "token_present": bool(_token["bearer"])}
+
+
+# Lambda handler (used when deployed as a container image on AWS Lambda)
+try:
+    from mangum import Mangum
+    handler = Mangum(app, lifespan="off")
+except ImportError:
+    pass
