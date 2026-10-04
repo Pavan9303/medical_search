@@ -27,6 +27,7 @@ async def _find_js_bundle_path(c: httpx.AsyncClient, h: dict) -> str:
     # Strategy 1: asset-manifest.json (most reliable — a static JSON file)
     try:
         resp = await c.get(f"{PORTAL_BASE}/dr/v3/asset-manifest.json", headers=h)
+        print(f"[token] asset-manifest: HTTP {resp.status_code}, body[:100]={resp.text[:100]!r}", flush=True)
         if resp.status_code == 200:
             files = resp.json().get("files", {})
             path = next(
@@ -44,6 +45,7 @@ async def _find_js_bundle_path(c: httpx.AsyncClient, h: dict) -> str:
     for url in (f"{PORTAL_BASE}/dr/v3/index.html", f"{PORTAL_BASE}/dr/v3"):
         try:
             resp = await c.get(url, headers={**h, "Accept": "text/html,*/*"})
+            print(f"[token] {url}: HTTP {resp.status_code}, body[:100]={resp.text[:100]!r}", flush=True)
             m = JS_PATH_RE.search(resp.text)
             if m:
                 print(f"[token] JS bundle via HTML ({url}): {m.group(0)}", flush=True)
