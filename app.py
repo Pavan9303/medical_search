@@ -22,22 +22,53 @@ MAX_RESULTS = 500
 
 # ─── Token refresh via HTTP (no browser needed) ───────────────────────────────
 
+async def _find_js_bundle_path(c: httpx.AsyncClient, h: dict) -> str:
+    """Return the path to the main JS bundle, trying multiple strategies."""
+    # Strategy 1: asset-manifest.json (most reliable — a static JSON file)
+    try:
+        resp = await c.get(f"{PORTAL_BASE}/dr/v3/asset-manifest.json", headers=h)
+        if resp.status_code == 200:
+            files = resp.json().get("files", {})
+            path = next(
+                (v for k, v in files.items()
+                 if "main" in k and k.endswith(".js") and "chunk" not in k),
+                None,
+            )
+            if path:
+                print(f"[token] JS bundle via asset-manifest: {path}", flush=True)
+                return path
+    except Exception as e:
+        print(f"[token] asset-manifest failed: {e}", flush=True)
+
+    # Strategy 2: fetch /dr/v3/index.html directly
+    for url in (f"{PORTAL_BASE}/dr/v3/index.html", f"{PORTAL_BASE}/dr/v3"):
+        try:
+            resp = await c.get(url, headers={**h, "Accept": "text/html,*/*"})
+            m = JS_PATH_RE.search(resp.text)
+            if m:
+                print(f"[token] JS bundle via HTML ({url}): {m.group(0)}", flush=True)
+                return m.group(0)
+        except Exception as e:
+            print(f"[token] HTML fetch {url} failed: {e}", flush=True)
+
+    print("[token] Could not find JS bundle path via any strategy", flush=True)
+    return ""
+
+
 async def _fetch_tokens_via_http() -> dict:
     """
-    1. Scrape the portal JS bundle to extract the hardcoded apikey.
-    2. GET /uma/sessions with that apikey → returns accessToken (bearer).
+    1. Locate the portal JS bundle via asset-manifest.json or HTML scraping.
+    2. Extract the hardcoded apikey from the bundle.
+    3. GET /uma/sessions with that apikey → returns accessToken (bearer).
     """
     h = {"User-Agent": UA, "Accept": "application/json,text/html,*/*"}
 
     async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=h) as c:
-        # Step 1: find JS bundle filename from portal HTML
-        html = (await c.get(f"{PORTAL_BASE}/dr/v3")).text
-        m = JS_PATH_RE.search(html)
-        if not m:
-            print("[token] JS bundle not found in portal HTML", flush=True)
+        js_path = await _find_js_bundle_path(c, h)
+        if not js_path:
             return {}
 
-        js_url = PORTAL_BASE + m.group(0)
+        js_url = PORTAL_BASE + js_path
         js_text = (await c.get(js_url)).text
 
         # Step 2: extract apikey — stored as  apikey:"eyJ..."  in the minified bundle
