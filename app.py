@@ -2,7 +2,6 @@ import asyncio
 import os
 import re
 import time
-import threading
 import httpx
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
@@ -23,8 +22,9 @@ UA           = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KH
 # The API endpoints (including /uma/sessions) are still accessible.
 _ENV_APIKEY  = os.environ.get("APIKEY", "").strip()
 
-_token: dict = {"bearer": "", "api_key": "", "fetched_at": 0.0}
-_lock = threading.Lock()
+_token: dict      = {"bearer": "", "api_key": "", "fetched_at": 0.0}
+_refresh_lock     = asyncio.Lock()   # prevents concurrent refresh calls
+TOKEN_TTL         = 13 * 60          # seconds before token is considered stale
 
 PAGE_SIZE   = 50
 MAX_RESULTS = 500
@@ -104,43 +104,36 @@ async def _fetch_tokens_via_http() -> dict:
         return {"api_key": api_key, "bearer": f"Bearer {access_token}"}
 
 
-def _refresh_token():
-    print("[token] Refreshing via HTTP…", flush=True)
-    try:
-        tokens = asyncio.run(_fetch_tokens_via_http())
-        if tokens.get("bearer") and tokens.get("api_key"):
-            with _lock:
-                _token["bearer"]     = tokens["bearer"]
-                _token["api_key"]    = tokens["api_key"]
-                _token["fetched_at"] = time.time()
-            print(f"[token] OK — {tokens['bearer'][:40]}…", flush=True)
-        else:
-            print("[token] WARNING: could not obtain tokens", flush=True)
-    except Exception as e:
-        print(f"[token] ERROR: {e}", flush=True)
+async def _get_headers() -> dict:
+    """Return auth headers, refreshing the token on-demand if missing or stale."""
+    age = time.time() - _token["fetched_at"]
+    if not _token["bearer"] or age > TOKEN_TTL:
+        async with _refresh_lock:
+            # Re-check after acquiring lock — another request may have just refreshed
+            age = time.time() - _token["fetched_at"]
+            if not _token["bearer"] or age > TOKEN_TTL:
+                print("[token] Refreshing…", flush=True)
+                try:
+                    tokens = await _fetch_tokens_via_http()
+                    if tokens.get("bearer"):
+                        _token["bearer"]     = tokens["bearer"]
+                        _token["api_key"]    = tokens["api_key"]
+                        _token["fetched_at"] = time.time()
+                        print(f"[token] OK — {tokens['bearer'][:40]}…", flush=True)
+                    else:
+                        print("[token] WARNING: could not obtain tokens", flush=True)
+                except Exception as e:
+                    print(f"[token] ERROR: {e}", flush=True)
 
-
-def _background_loop():
-    _refresh_token()
-    while True:
-        time.sleep(14 * 60)
-        _refresh_token()
-
-
-def _get_headers() -> dict:
-    with _lock:
-        bearer  = _token["bearer"]
-        api_key = _token["api_key"]
-    if not bearer:
-        raise HTTPException(status_code=503, detail="Token not ready — retry in a few seconds.")
-    return {"Accept": "application/json", "Authorization": bearer, "Apikey": api_key}
+    if not _token["bearer"]:
+        raise HTTPException(status_code=503, detail="Token unavailable — please retry.")
+    return {"Accept": "application/json", "Authorization": _token["bearer"], "Apikey": _token["api_key"]}
 
 
 # ─── App lifecycle ────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    threading.Thread(target=_background_loop, daemon=True).start()
     yield
 
 
@@ -163,11 +156,11 @@ async def health_head():
 
 async def _get(client: httpx.AsyncClient, url: str, params: dict) -> httpx.Response:
     """GET with one retry on 403/429 (ABDM sandbox rate limit)."""
-    resp = await client.get(url, params=params, headers=_get_headers())
+    resp = await client.get(url, params=params, headers=await _get_headers())
     if resp.status_code in (403, 429):
         print(f"[api] {resp.status_code} — retrying in 5s", flush=True)
         await asyncio.sleep(5)
-        resp = await client.get(url, params=params, headers=_get_headers())
+        resp = await client.get(url, params=params, headers=await _get_headers())
     return resp
 
 
@@ -244,7 +237,7 @@ async def get_generic(generic_id: str):
 async def get_supplier(supplier_id: str):
     async with httpx.AsyncClient(timeout=60) as c:
         items, total = await _fetch_all_pages(c, f"{ABDM_BASE}/suppliers/{supplier_id}", {}, "drugDetails")
-        r0 = await c.get(f"{ABDM_BASE}/suppliers/{supplier_id}", params={"page": 0, "limit": 1}, headers=_get_headers())
+        r0 = await c.get(f"{ABDM_BASE}/suppliers/{supplier_id}", params={"page": 0, "limit": 1}, headers=await _get_headers())
     meta = r0.json().get("supplierDetails", {}) if r0.status_code == 200 else {}
     return {"drugDetails": items, "drugsCount": total, "returned": len(items), "supplierDetails": meta}
 
@@ -252,7 +245,7 @@ async def get_supplier(supplier_id: str):
 @app.get("/api/substance/{substance_id}")
 async def get_substance(substance_id: str):
     async with httpx.AsyncClient(timeout=20) as c:
-        resp = await c.get(f"{ABDM_BASE}/substances/{substance_id}", headers=_get_headers())
+        resp = await c.get(f"{ABDM_BASE}/substances/{substance_id}", headers=await _get_headers())
     if resp.status_code != 200:
         raise HTTPException(status_code=resp.status_code, detail=resp.text)
     return resp.json()
