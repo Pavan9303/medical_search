@@ -1,69 +1,81 @@
 import asyncio
+import re
 import time
 import threading
 import httpx
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Query, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
-from playwright.sync_api import sync_playwright
 
-ABDM_BASE = "https://drugregistrysbx.abdm.gov.in/drug-registry/v1"
-PORTAL_URL = "https://drugregistrysbx.abdm.gov.in/"
+ABDM_BASE    = "https://drugregistrysbx.abdm.gov.in/drug-registry/v1"
+PORTAL_BASE  = "https://drugregistrysbx.abdm.gov.in"
+JS_PATH_RE   = re.compile(r"/dr/v3/static/js/main\.[a-f0-9]+\.js")
+UA           = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
 _token: dict = {"bearer": "", "api_key": "", "fetched_at": 0.0}
 _lock = threading.Lock()
 
+PAGE_SIZE   = 50
+MAX_RESULTS = 500
 
-# ─── Token refresh via headless browser ───────────────────────────────────────
 
-def _fetch_tokens_via_browser() -> dict:
-    captured = {}
-    all_urls = []
+# ─── Token refresh via HTTP (no browser needed) ───────────────────────────────
 
-    def on_request(req):
-        all_urls.append(req.url)
-        h = req.headers
-        if "apikey" in h and "api_key" not in captured:
-            captured["api_key"] = h["apikey"]
-        if "authorization" in h and "bearer" not in captured:
-            captured["bearer"] = h["authorization"]
+async def _fetch_tokens_via_http() -> dict:
+    """
+    1. Scrape the portal JS bundle to extract the hardcoded apikey.
+    2. GET /uma/sessions with that apikey → returns accessToken (bearer).
+    """
+    h = {"User-Agent": UA, "Accept": "application/json,text/html,*/*"}
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-setuid-sandbox", "--disable-gpu"],
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=h) as c:
+        # Step 1: find JS bundle filename from portal HTML
+        html = (await c.get(f"{PORTAL_BASE}/dr/v3")).text
+        m = JS_PATH_RE.search(html)
+        if not m:
+            print("[token] JS bundle not found in portal HTML", flush=True)
+            return {}
+
+        js_url = PORTAL_BASE + m.group(0)
+        js_text = (await c.get(js_url)).text
+
+        # Step 2: extract apikey — stored as  apikey:"eyJ..."  in the minified bundle
+        key_m = re.search(r'apikey:"([^"]+)"', js_text)
+        if not key_m:
+            print("[token] apikey not found in JS bundle", flush=True)
+            return {}
+        api_key = key_m.group(1)
+
+        # Step 3: GET /uma/sessions → { "accessToken": "eyJ..." }
+        sess = await c.get(
+            f"{PORTAL_BASE}/drug-registry/v1/uma/sessions",
+            headers={**h, "Apikey": api_key},
         )
-        ctx = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        )
-        page = ctx.new_page()
-        page.on("request", on_request)
-        page.goto(PORTAL_URL, wait_until="domcontentloaded", timeout=30000)
-        # Wait until the portal's auth API call fires (up to 25s)
-        try:
-            page.wait_for_request(lambda r: "uma/sessions" in r.url or "drug-attributes" in r.url, timeout=25000)
-            page.wait_for_timeout(3000)  # let subsequent auth requests arrive
-        except Exception:
-            page.wait_for_timeout(5000)  # fallback
-        browser.close()
+        if sess.status_code != 200:
+            print(f"[token] /uma/sessions {sess.status_code}: {sess.text[:150]}", flush=True)
+            return {}
 
-    print(f"[token] intercepted {len(all_urls)} requests, keys: {list(captured.keys())}", flush=True)
-    return captured
+        access_token = sess.json().get("accessToken", "")
+        if not access_token:
+            print(f"[token] no accessToken in response: {sess.text[:150]}", flush=True)
+            return {}
+
+        return {"api_key": api_key, "bearer": f"Bearer {access_token}"}
 
 
 def _refresh_token():
-    print("[token] Refreshing via headless browser…", flush=True)
+    print("[token] Refreshing via HTTP…", flush=True)
     try:
-        tokens = _fetch_tokens_via_browser()
+        tokens = asyncio.run(_fetch_tokens_via_http())
         if tokens.get("bearer") and tokens.get("api_key"):
             with _lock:
-                _token["bearer"] = tokens["bearer"]
-                _token["api_key"] = tokens["api_key"]
+                _token["bearer"]     = tokens["bearer"]
+                _token["api_key"]    = tokens["api_key"]
                 _token["fetched_at"] = time.time()
-            print(f"[token] OK — bearer={tokens['bearer'][:30]}…", flush=True)
+            print(f"[token] OK — {tokens['bearer'][:40]}…", flush=True)
         else:
-            print(f"[token] WARNING: incomplete tokens {list(tokens.keys())}", flush=True)
+            print("[token] WARNING: could not obtain tokens", flush=True)
     except Exception as e:
         print(f"[token] ERROR: {e}", flush=True)
 
@@ -77,15 +89,11 @@ def _background_loop():
 
 def _get_headers() -> dict:
     with _lock:
-        bearer = _token["bearer"]
+        bearer  = _token["bearer"]
         api_key = _token["api_key"]
     if not bearer:
-        raise HTTPException(status_code=503, detail="Token not ready yet — retry in a few seconds.")
-    return {
-        "Accept": "application/json",
-        "Authorization": bearer,
-        "Apikey": api_key,
-    }
+        raise HTTPException(status_code=503, detail="Token not ready — retry in a few seconds.")
+    return {"Accept": "application/json", "Authorization": bearer, "Apikey": api_key}
 
 
 # ─── App lifecycle ────────────────────────────────────────────────────────────
@@ -97,13 +105,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Medical Universal Search", lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
 # ─── Static frontend ──────────────────────────────────────────────────────────
@@ -114,118 +116,93 @@ async def serve_frontend():
 
 @app.head("/")
 async def health_head():
-    from fastapi.responses import Response
     return Response(status_code=200)
 
 
-# ─── Helpers ─────────────────────────────────────────────────────────────────
-
-PAGE_SIZE = 50      # max per request to the upstream API
-MAX_RESULTS = 500   # cap to avoid very long fetches (500 = 10 concurrent pages)
+# ─── Pagination helpers ───────────────────────────────────────────────────────
 
 async def _fetch_all_pages(client: httpx.AsyncClient, url: str, base_params: dict, data_key: str) -> tuple[list, int]:
-    """
-    Fetch page 0 to learn total count, then fetch all remaining pages
-    concurrently. Returns (all_items, total_count).
-    """
-    # Page 0
     r0 = await client.get(url, params={**base_params, "page": 0, "limit": PAGE_SIZE}, headers=_get_headers())
     if r0.status_code != 200:
         raise HTTPException(status_code=r0.status_code, detail=r0.text)
-    body0 = r0.json()
-    items = list(body0.get(data_key, []))
-    total = body0.get("count") or body0.get("drugsCount") or len(items)
+    body0   = r0.json()
+    items   = list(body0.get(data_key, []))
+    total   = body0.get("count") or body0.get("drugsCount") or len(items)
 
-    # How many more pages do we need?
-    remaining_items = min(total, MAX_RESULTS) - len(items)
-    if remaining_items <= 0:
+    remaining  = min(total, MAX_RESULTS) - len(items)
+    if remaining <= 0:
         return items, total
 
-    pages_needed = (remaining_items + PAGE_SIZE - 1) // PAGE_SIZE
-    tasks = [
-        client.get(url, params={**base_params, "page": p + 1, "limit": PAGE_SIZE}, headers=_get_headers())
-        for p in range(pages_needed)
-    ]
-    responses = await asyncio.gather(*tasks)
-    for resp in responses:
+    pages = (remaining + PAGE_SIZE - 1) // PAGE_SIZE
+    tasks = [client.get(url, params={**base_params, "page": p + 1, "limit": PAGE_SIZE}, headers=_get_headers()) for p in range(pages)]
+    for resp in await asyncio.gather(*tasks):
         if resp.status_code == 200:
             items.extend(resp.json().get(data_key, []))
 
     return items[:MAX_RESULTS], total
 
 
+async def _fetch_all_alternates(client: httpx.AsyncClient, url: str) -> dict:
+    r0       = await client.get(url, params={"page": 0}, headers=_get_headers())
+    if r0.status_code != 200:
+        raise HTTPException(status_code=r0.status_code, detail=r0.text)
+    body0    = r0.json()
+    total    = body0.get("totalCount", 0)
+    per_page = len(body0.get("alternateDrugs", [])) or 25
+
+    pages    = max(0, (min(total, MAX_RESULTS) - per_page + per_page - 1) // per_page)
+    extra: list = []
+    if pages > 0:
+        tasks = [client.get(url, params={"page": p + 1}, headers=_get_headers()) for p in range(pages)]
+        for resp in await asyncio.gather(*tasks):
+            if resp.status_code == 200:
+                extra.extend(resp.json().get("alternateDrugs", []))
+
+    seen, deduped = set(), []
+    for item in body0.get("alternateDrugs", []) + extra:
+        k = item.get("brandIdentifier")
+        if k and k not in seen:
+            seen.add(k); deduped.append(item)
+
+    body0["alternateDrugs"] = deduped[:MAX_RESULTS]
+    body0["totalCount"]     = total
+    return body0
+
+
 # ─── API routes ───────────────────────────────────────────────────────────────
 
 @app.get("/api/search")
 async def search_drugs(q: str = Query(...)):
-    async with httpx.AsyncClient(timeout=60) as client:
-        items, total = await _fetch_all_pages(client, f"{ABDM_BASE}/search", {"q": q}, "drugDetails")
+    async with httpx.AsyncClient(timeout=60) as c:
+        items, total = await _fetch_all_pages(c, f"{ABDM_BASE}/search", {"q": q}, "drugDetails")
     return {"drugDetails": items, "count": total, "returned": len(items)}
-
-
-async def _fetch_all_alternates(client: httpx.AsyncClient, url: str) -> dict:
-    """Fetch all paginated alternateDrugs for a brand or generic endpoint, deduped by brandIdentifier."""
-    r0 = await client.get(url, params={"page": 0}, headers=_get_headers())
-    if r0.status_code != 200:
-        raise HTTPException(status_code=r0.status_code, detail=r0.text)
-    body0 = r0.json()
-    total = body0.get("totalCount", 0)
-    per_page = len(body0.get("alternateDrugs", [])) or 25
-
-    pages_needed = max(0, (min(total, MAX_RESULTS) - per_page + per_page - 1) // per_page)
-    extra_pages: list = []
-    if pages_needed > 0:
-        tasks = [client.get(url, params={"page": p + 1}, headers=_get_headers()) for p in range(pages_needed)]
-        for resp in await asyncio.gather(*tasks):
-            if resp.status_code == 200:
-                extra_pages.extend(resp.json().get("alternateDrugs", []))
-
-    # Deduplicate by brandIdentifier, preserving order
-    seen: set = set()
-    deduped = []
-    for item in (body0.get("alternateDrugs", []) + extra_pages):
-        key = item.get("brandIdentifier")
-        if key and key not in seen:
-            seen.add(key)
-            deduped.append(item)
-
-    body0["alternateDrugs"] = deduped[:MAX_RESULTS]
-    body0["totalCount"] = total
-    return body0
 
 
 @app.get("/api/brand/{brand_id}")
 async def get_brand(brand_id: str):
-    async with httpx.AsyncClient(timeout=60) as client:
-        return await _fetch_all_alternates(client, f"{ABDM_BASE}/brand/{brand_id}")
+    async with httpx.AsyncClient(timeout=60) as c:
+        return await _fetch_all_alternates(c, f"{ABDM_BASE}/brand/{brand_id}")
 
 
 @app.get("/api/generic/{generic_id}")
 async def get_generic(generic_id: str):
-    async with httpx.AsyncClient(timeout=60) as client:
-        return await _fetch_all_alternates(client, f"{ABDM_BASE}/generics/{generic_id}")
+    async with httpx.AsyncClient(timeout=60) as c:
+        return await _fetch_all_alternates(c, f"{ABDM_BASE}/generics/{generic_id}")
 
 
 @app.get("/api/supplier/{supplier_id}")
 async def get_supplier(supplier_id: str):
-    async with httpx.AsyncClient(timeout=60) as client:
-        items, total = await _fetch_all_pages(
-            client, f"{ABDM_BASE}/suppliers/{supplier_id}", {}, "drugDetails"
-        )
-        # Also fetch supplier meta from the first page (already done inside helper — re-fetch for details)
-        r0 = await client.get(
-            f"{ABDM_BASE}/suppliers/{supplier_id}",
-            params={"page": 0, "limit": 1},
-            headers=_get_headers(),
-        )
-    supplier_details = r0.json().get("supplierDetails", {}) if r0.status_code == 200 else {}
-    return {"drugDetails": items, "drugsCount": total, "returned": len(items), "supplierDetails": supplier_details}
+    async with httpx.AsyncClient(timeout=60) as c:
+        items, total = await _fetch_all_pages(c, f"{ABDM_BASE}/suppliers/{supplier_id}", {}, "drugDetails")
+        r0 = await c.get(f"{ABDM_BASE}/suppliers/{supplier_id}", params={"page": 0, "limit": 1}, headers=_get_headers())
+    meta = r0.json().get("supplierDetails", {}) if r0.status_code == 200 else {}
+    return {"drugDetails": items, "drugsCount": total, "returned": len(items), "supplierDetails": meta}
 
 
 @app.get("/api/substance/{substance_id}")
 async def get_substance(substance_id: str):
-    async with httpx.AsyncClient(timeout=20) as client:
-        resp = await client.get(f"{ABDM_BASE}/substances/{substance_id}", headers=_get_headers())
+    async with httpx.AsyncClient(timeout=20) as c:
+        resp = await c.get(f"{ABDM_BASE}/substances/{substance_id}", headers=_get_headers())
     if resp.status_code != 200:
         raise HTTPException(status_code=resp.status_code, detail=resp.text)
     return resp.json()
@@ -233,9 +210,4 @@ async def get_substance(substance_id: str):
 
 @app.get("/api/health")
 async def health():
-    age = round(time.time() - _token["fetched_at"])
-    return {
-        "status": "ok",
-        "token_age_seconds": age,
-        "token_present": bool(_token["bearer"]),
-    }
+    return {"status": "ok", "token_age_seconds": round(time.time() - _token["fetched_at"]), "token_present": bool(_token["bearer"])}
