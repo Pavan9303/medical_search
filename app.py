@@ -9,6 +9,7 @@ from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 
+BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
 ABDM_BASE    = "https://drugregistrysbx.abdm.gov.in/drug-registry/v1"
 PORTAL_BASE  = "https://drugregistrysbx.abdm.gov.in"
 JS_PATH_RE   = re.compile(r"/dr/v3/static/js/main\.[a-f0-9]+\.js")
@@ -151,7 +152,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 @app.get("/")
 async def serve_frontend():
-    return FileResponse("index.html")
+    return FileResponse(os.path.join(BASE_DIR, "index.html"))
 
 @app.head("/")
 async def health_head():
@@ -160,8 +161,18 @@ async def health_head():
 
 # ─── Pagination helpers ───────────────────────────────────────────────────────
 
+async def _get(client: httpx.AsyncClient, url: str, params: dict) -> httpx.Response:
+    """GET with one retry on 403/429 (ABDM sandbox rate limit)."""
+    resp = await client.get(url, params=params, headers=_get_headers())
+    if resp.status_code in (403, 429):
+        print(f"[api] {resp.status_code} — retrying in 5s", flush=True)
+        await asyncio.sleep(5)
+        resp = await client.get(url, params=params, headers=_get_headers())
+    return resp
+
+
 async def _fetch_all_pages(client: httpx.AsyncClient, url: str, base_params: dict, data_key: str) -> tuple[list, int]:
-    r0 = await client.get(url, params={**base_params, "page": 0, "limit": PAGE_SIZE}, headers=_get_headers())
+    r0 = await _get(client, url, {**base_params, "page": 0, "limit": PAGE_SIZE})
     if r0.status_code != 200:
         raise HTTPException(status_code=r0.status_code, detail=r0.text)
     body0   = r0.json()
@@ -173,7 +184,7 @@ async def _fetch_all_pages(client: httpx.AsyncClient, url: str, base_params: dic
         return items, total
 
     pages = (remaining + PAGE_SIZE - 1) // PAGE_SIZE
-    tasks = [client.get(url, params={**base_params, "page": p + 1, "limit": PAGE_SIZE}, headers=_get_headers()) for p in range(pages)]
+    tasks = [_get(client, url, {**base_params, "page": p + 1, "limit": PAGE_SIZE}) for p in range(pages)]
     for resp in await asyncio.gather(*tasks):
         if resp.status_code == 200:
             items.extend(resp.json().get(data_key, []))
@@ -182,7 +193,7 @@ async def _fetch_all_pages(client: httpx.AsyncClient, url: str, base_params: dic
 
 
 async def _fetch_all_alternates(client: httpx.AsyncClient, url: str) -> dict:
-    r0       = await client.get(url, params={"page": 0}, headers=_get_headers())
+    r0       = await _get(client, url, {"page": 0})
     if r0.status_code != 200:
         raise HTTPException(status_code=r0.status_code, detail=r0.text)
     body0    = r0.json()
@@ -192,7 +203,7 @@ async def _fetch_all_alternates(client: httpx.AsyncClient, url: str) -> dict:
     pages    = max(0, (min(total, MAX_RESULTS) - per_page + per_page - 1) // per_page)
     extra: list = []
     if pages > 0:
-        tasks = [client.get(url, params={"page": p + 1}, headers=_get_headers()) for p in range(pages)]
+        tasks = [_get(client, url, {"page": p + 1}) for p in range(pages)]
         for resp in await asyncio.gather(*tasks):
             if resp.status_code == 200:
                 extra.extend(resp.json().get("alternateDrugs", []))
