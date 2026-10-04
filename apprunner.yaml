@@ -1,0 +1,13 @@
+version: 1.0
+runtime: docker
+build:
+  context: .
+  dockerfile: Dockerfile
+run:
+  runtime-version: latest
+  network:
+    port: 8000
+    env: PORT
+  env:
+    - name: APIKEY
+      value: ""
