@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Medical Universal Search</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #f0f4f8;
+      --surface: #ffffff;
+      --border: #dde3ec;
+      --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --text: #1e293b;
+      --muted: #64748b;
+      --radius: 10px;
+      --shadow: 0 2px 8px rgba(0,0,0,.08);
+    }
+
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+
+    header { background: var(--primary); color: #fff; padding: 16px 24px; display: flex; align-items: center; gap: 12px; box-shadow: 0 2px 6px rgba(0,0,0,.15); }
+    header h1 { font-size: 1.2rem; font-weight: 700; }
+
+    .container { max-width: 960px; margin: 28px auto; padding: 0 16px; }
+
+    .actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 24px; }
+    .btn-action { background: var(--surface); border: 2px solid var(--border); border-radius: var(--radius); padding: 16px 10px; cursor: pointer; text-align: center; transition: border-color .15s, box-shadow .15s, transform .1s; font-size: .9rem; font-weight: 600; color: var(--text); }
+    .btn-action:hover { border-color: var(--primary); box-shadow: var(--shadow); transform: translateY(-1px); }
+    .btn-action.active { border-color: var(--primary); background: #eff6ff; }
+    .btn-action .icon { font-size: 1.6rem; display: block; margin-bottom: 6px; }
+    .btn-action .desc { font-size: .72rem; font-weight: 400; color: var(--muted); margin-top: 4px; line-height: 1.4; }
+
+    .search-row { display: flex; gap: 10px; margin-bottom: 8px; }
+    .search-row input { flex: 1; padding: 11px 16px; border: 2px solid var(--border); border-radius: var(--radius); font-size: 1rem; outline: none; transition: border-color .15s; }
+    .search-row input:focus { border-color: var(--primary); }
+    .search-row button { padding: 11px 22px; background: var(--primary); color: #fff; border: none; border-radius: var(--radius); font-size: 1rem; font-weight: 600; cursor: pointer; white-space: nowrap; }
+    .search-row button:hover { background: var(--primary-hover); }
+    .search-row button:disabled { opacity: .5; cursor: default; }
+
+    #hint { font-size: .85rem; color: var(--muted); margin-bottom: 20px; min-height: 18px; }
+
+    #results { display: flex; flex-direction: column; gap: 14px; }
+
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; box-shadow: var(--shadow); }
+    .card-title { font-size: 1rem; font-weight: 700; margin-bottom: 8px; }
+    .card-title a { color: var(--primary); text-decoration: none; cursor: pointer; }
+    .card-title a:hover { text-decoration: underline; }
+
+    .pill-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+    .pill { font-size: .76rem; padding: 3px 9px; border-radius: 999px; font-weight: 500; }
+    .blue   { background: #dbeafe; color: #1d4ed8; }
+    .green  { background: #dcfce7; color: #15803d; }
+    .amber  { background: #fef3c7; color: #92400e; }
+    .purple { background: #ede9fe; color: #6d28d9; }
+    .red    { background: #fee2e2; color: #b91c1c; }
+
+    .detail { margin-top: 12px; }
+    .detail h3 { font-size: .78rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-bottom: 4px; }
+    .detail p { font-size: .88rem; line-height: 1.65; }
+
+    details > summary { cursor: pointer; font-size: .85rem; color: var(--primary); margin-top: 10px; user-select: none; }
+    details[open] > summary { margin-bottom: 8px; }
+
+    .id-row { margin-top: 10px; font-size: .76rem; color: var(--muted); display: flex; flex-wrap: wrap; gap: 12px; }
+    .id-row code { background: #f1f5f9; padding: 1px 5px; border-radius: 4px; font-size: .74rem; }
+
+    .alt-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 6px; margin-top: 6px; }
+    .alt-item { font-size: .82rem; }
+    .alt-item a { color: var(--primary); cursor: pointer; }
+    .alt-item a:hover { text-decoration: underline; }
+
+    .meta-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+
+    .loading { text-align: center; color: var(--muted); padding: 40px; }
+    .error { background: #fef2f2; border: 1px solid #fca5a5; border-radius: var(--radius); padding: 14px 18px; color: #b91c1c; }
+    .info-bar { font-size: .85rem; color: var(--muted); margin-bottom: 4px; }
+
+    .result-count { font-size: .85rem; color: var(--muted); margin-bottom: 10px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <span style="font-size:1.5rem">💊</span>
+  <h1>Medical Universal Search — ABDM Drug Registry</h1>
+</header>
+
+<div class="container">
+  <div class="actions">
+    <button class="btn-action active" data-mode="search"    onclick="setMode('search')">
+      <span class="icon">🔍</span>Search Medicines
+      <span class="desc">Search the registry by drug or brand name. Shows all matching brands with composition, indication & alternatives.</span>
+    </button>
+    <button class="btn-action" data-mode="brand" onclick="setMode('brand')">
+      <span class="icon">💊</span>Brand Detail
+      <span class="desc">Full profile of a specific brand — dosage form, supplier, active substances & all alternate brands. Click a brand ID from search results.</span>
+    </button>
+    <button class="btn-action" data-mode="generic" onclick="setMode('generic')">
+      <span class="icon">🧬</span>Generic Detail
+      <span class="desc">Details for a generic (active molecule) — indication, contraindication & all brands that contain it. Click a generic ID from search results.</span>
+    </button>
+    <button class="btn-action" data-mode="supplier" onclick="setMode('supplier')">
+      <span class="icon">🏭</span>Supplier Drugs
+      <span class="desc">Full drug catalogue for a manufacturer/supplier. Click a supplier ID from search results to see every drug they make.</span>
+    </button>
+    <button class="btn-action" data-mode="substance" onclick="setMode('substance')">
+      <span class="icon">🧪</span>Substance Detail
+      <span class="desc">Deep info on an active substance — CAS number, UNII, SMILES, molecular formula, description & toxicity. Click a substance ID from search results.</span>
+    </button>
+  </div>
+
+  <p id="hint">Type a drug name and press Search.</p>
+
+  <div class="search-row">
+    <input id="query" type="text" placeholder="e.g. Paracetamol" autocomplete="off" />
+    <button id="searchBtn" onclick="doSearch()">Search</button>
+  </div>
+
+  <div id="results"></div>
+</div>
+
+<script>
+  let mode = "search", lastQ = "";
+
+  const hintMap = {
+    search:    "Enter a drug / brand name to search the registry.",
+    brand:     "Enter a brand identifier — e.g. 1264841000189106",
+    generic:   "Enter a generic identifier — e.g. 322236009",
+    supplier:  "Enter a supplier identifier — e.g. 9951000189106",
+    substance: "Enter a substance identifier — e.g. 387517004",
+  };
+
+  function setMode(m) {
+    mode = m; page = 0;
+    document.querySelectorAll(".btn-action").forEach(b => b.classList.toggle("active", b.dataset.mode === m));
+    document.getElementById("hint").textContent = hintMap[m];
+    document.getElementById("query").placeholder = m === "search" ? "e.g. Paracetamol" : "Enter identifier…";
+    document.getElementById("results").innerHTML = "";
+  }
+
+  document.getElementById("query").addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
+
+  async function doSearch() { lastQ = document.getElementById("query").value.trim(); if (!lastQ) return; await run(lastQ); }
+
+  async function run(q) {
+    const btn = document.getElementById("searchBtn");
+    btn.disabled = true; btn.textContent = "Loading…";
+    document.getElementById("results").innerHTML = `<div class="loading">⏳ Fetching all results…</div>`;
+    try {
+      const urls = {
+        search:    `/api/search?q=${enc(q)}`,
+        brand:     `/api/brand/${enc(q)}`,
+        generic:   `/api/generic/${enc(q)}`,
+        supplier:  `/api/supplier/${enc(q)}`,
+        substance: `/api/substance/${enc(q)}`,
+      };
+      const resp = await fetch(urls[mode]);
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.detail || JSON.stringify(data));
+      render(data, q);
+    } catch(e) {
+      document.getElementById("results").innerHTML = `<div class="error">❌ ${e.message}</div>`;
+    } finally { btn.disabled = false; btn.textContent = "Search"; }
+  }
+
+  function enc(s) { return encodeURIComponent(s); }
+
+  function render(data, q) {
+    const el = document.getElementById("results");
+    if (mode === "search") {
+      const items = data.drugDetails || [];
+      const total = data.count || items.length;
+      const returned = data.returned || items.length;
+      if (!items.length) { el.innerHTML = `<div class="card">No results for "<strong>${q}</strong>".</div>`; return; }
+      const capped = returned < total ? ` — showing first ${returned.toLocaleString()}` : "";
+      el.innerHTML = `<p class="result-count">${total.toLocaleString()} results found${capped}</p>`;
+      items.forEach(d => el.appendChild(searchCard(d)));
+    } else if (mode === "brand")     { el.innerHTML = ""; el.appendChild(brandCard(data)); }
+    else if (mode === "generic")     { el.innerHTML = ""; el.appendChild(genericCard(data.generic || data, data)); }
+    else if (mode === "supplier")    { el.innerHTML = ""; renderSupplier(el, data); }
+    else if (mode === "substance")   { el.innerHTML = ""; el.appendChild(substanceCard(data)); }
+  }
+
+  // ── Search card (rich inline data) ──────────────────────────────────────────
+  function searchCard(d) {
+    const c = div("card");
+    const subs = arr(d.substanceName).map(s=>`<span class="pill green">${s}</span>`).join("");
+    const routes = arr(d.routeOfAdministrationName).map(r=>`<span class="pill purple">${r}</span>`).join("");
+    const alts = arr(d.alternativeDrugs).slice(0,5).map(a=>
+      `<div class="alt-item"><a onclick="drill('brand','${a.brandIdentifier}')">${a.brandName}</a></div>`
+    ).join("");
+
+    c.innerHTML = `
+      <div class="card-title"><a onclick="drill('brand','${d.brandIdentifier}')">${d.brandName}</a></div>
+      <div class="pill-row">
+        <span class="pill amber">🏭 ${d.supplierName||""}</span>
+        <span class="pill blue">${d.doseForm||""}</span>
+        ${routes}${subs}
+      </div>
+      ${d.indication ? `<div class="detail"><h3>Indication</h3><p>${d.indication}</p></div>` : ""}
+      <details>
+        <summary>More details ▾</summary>
+        ${d.contraIndication ? `<div class="detail"><h3>Contraindication</h3><p>${d.contraIndication}</p></div>` : ""}
+        ${arr(d.substanceDescription).filter(Boolean).length
+          ? `<div class="detail"><h3>Substance Description</h3><p>${arr(d.substanceDescription).filter(Boolean).join(" | ")}</p></div>` : ""}
+        ${arr(d.toxity).filter(Boolean).length
+          ? `<div class="detail"><h3>Toxicity</h3><p>${arr(d.toxity).filter(Boolean).join(", ")}</p></div>` : ""}
+        ${arr(d.casNumber).filter(Boolean).length
+          ? `<div class="meta-chips">${arr(d.casNumber).filter(Boolean).map(v=>`<span class="pill blue">CAS: ${v}</span>`).join("")}
+             ${arr(d.unii).filter(Boolean).map(v=>`<span class="pill purple">UNII: ${v}</span>`).join("")}
+             ${arr(d.smile).filter(Boolean).map(v=>`<span class="pill green">SMILES: ${v}</span>`).join("")}</div>` : ""}
+        ${alts ? `<div class="detail"><h3>Alternate Brands (top 5)</h3><div class="alt-grid">${alts}</div></div>` : ""}
+      </details>
+      <div class="id-row">
+        <span>Brand: <code>${d.brandIdentifier}</code></span>
+        <span>Generic: <code onclick="drill('generic','${d.genericIdentifier}')" style="cursor:pointer;color:var(--primary)">${d.genericIdentifier}</code></span>
+        ${arr(d.substanceIdentifier).length ? `<span>Substance: <code onclick="drill('substance','${d.substanceIdentifier[0]}')" style="cursor:pointer;color:var(--primary)">${d.substanceIdentifier[0]}</code></span>` : ""}
+        <span>Supplier: <code onclick="drill('supplier','${d.supplierIdentifier}')" style="cursor:pointer;color:var(--primary)">${d.supplierIdentifier}</code></span>
+      </div>`;
+    return c;
+  }
+
+  // ── Brand detail card ────────────────────────────────────────────────────────
+  function brandCard(data) {
+    const c = div("card");
+    const b = data.brand||{}, g = data.generic||{}, sup = data.supplier||{};
+    const subs = arr(data.substances).map(s=>`<span class="pill green" onclick="drill('substance','${s.identifier}')" style="cursor:pointer">${s.name}</span>`).join("");
+    const routes = arr(data.routeOfAdministrations).map(r=>`<span class="pill purple">${r.name}</span>`).join("");
+    const alts = arr(data.alternateDrugs).map(a=>
+      `<div class="alt-item"><a onclick="drill('brand','${a.brandIdentifier}')">${a.brandName}</a></div>`).join("");
+    c.innerHTML = `
+      <div class="card-title">💊 ${b.name||"Brand Detail"}</div>
+      <div class="pill-row"><span class="pill amber">${data.doseForm||""}</span>${routes}${subs}</div>
+      ${g.name?`<div class="detail"><h3>Generic</h3><p><a onclick="drill('generic','${g.identifier}')" style="cursor:pointer;color:var(--primary)">${g.name}</a></p></div>`:""}
+      ${sup.name?`<div class="detail"><h3>Supplier</h3><p><a onclick="drill('supplier','${sup.identifier}')" style="cursor:pointer;color:var(--primary)">${sup.name}</a></p></div>`:""}
+      ${g.indication?`<div class="detail"><h3>Indication</h3><p>${g.indication}</p></div>`:""}
+      ${g.contraIndication?`<div class="detail"><h3>Contraindication</h3><p>${g.contraIndication}</p></div>`:""}
+      ${alts?`<details><summary>Alternate Brands (${(data.totalCount||arr(data.alternateDrugs).length).toLocaleString()}) ▾</summary><div class="alt-grid" style="margin-top:8px">${alts}</div></details>`:""}`;
+    return c;
+  }
+
+  // ── Generic detail card ──────────────────────────────────────────────────────
+  function genericCard(g, data) {
+    const c = div("card");
+    const subs = arr(data.substances).map(s=>`<span class="pill green" onclick="drill('substance','${s.identifier}')" style="cursor:pointer">${s.name}</span>`).join("");
+    const routes = arr(data.routeOfAdministrations).map(r=>`<span class="pill purple">${r.name}</span>`).join("");
+    const alts = arr(data.alternateDrugs).map(a=>
+      `<div class="alt-item"><a onclick="drill('brand','${a.brandIdentifier}')">${a.brandName}</a></div>`).join("");
+    c.innerHTML = `
+      <div class="card-title">🧬 ${g.name||"Generic Detail"}</div>
+      <div class="pill-row"><span class="pill amber">${data.doseForm||""}</span>${routes}${subs}</div>
+      ${g.indication?`<div class="detail"><h3>Indication</h3><p>${g.indication}</p></div>`:""}
+      ${g.contraIndication?`<div class="detail"><h3>Contraindication</h3><p>${g.contraIndication}</p></div>`:""}
+      ${alts?`<details><summary>Alternate Brands (${(data.totalCount||arr(data.alternateDrugs).length).toLocaleString()}) ▾</summary><div class="alt-grid" style="margin-top:8px">${alts}</div></details>`:""}`;
+    return c;
+  }
+
+  // ── Supplier ─────────────────────────────────────────────────────────────────
+  function renderSupplier(el, data) {
+    const info = data.supplierDetails||{};
+    const total = data.drugsCount || (data.drugDetails||[]).length;
+    const returned = data.returned || (data.drugDetails||[]).length;
+    const capped = returned < total ? ` — showing first ${returned.toLocaleString()}` : "";
+    const header = div("card");
+    header.innerHTML = `<div class="card-title">🏭 ${info.name||"Supplier"}</div>
+      <div class="pill-row">
+        <span class="pill blue">${info.country||""}</span>
+        <span class="pill amber">${total.toLocaleString()} drugs${capped}</span>
+      </div>`;
+    el.appendChild(header);
+    (data.drugDetails||[]).forEach(d => el.appendChild(searchCard(d)));
+  }
+
+  // ── Substance card ────────────────────────────────────────────────────────────
+  function substanceCard(d) {
+    const c = div("card");
+    c.innerHTML = `
+      <div class="card-title">🧪 ${d.substanceName||"Substance"}</div>
+      <div class="pill-row">
+        ${d.casNumber?`<span class="pill blue">CAS: ${d.casNumber}</span>`:""}
+        ${d.unii?`<span class="pill purple">UNII: ${d.unii}</span>`:""}
+        ${d.molecularFormula?`<span class="pill green">${d.molecularFormula}</span>`:""}
+      </div>
+      ${d.substanceDescription?`<div class="detail"><h3>Description</h3><p>${d.substanceDescription}</p></div>`:""}
+      ${d.toxity?`<div class="detail"><h3>Toxicity</h3><p>${d.toxity}</p></div>`:""}`;
+    return c;
+  }
+
+  async function drill(m, id) {
+    setMode(m);
+    document.getElementById("query").value = id;
+    lastQ = id;
+    await run(id);
+    window.scrollTo({top:0,behavior:"smooth"});
+  }
+
+  function div(cls) { const d = document.createElement("div"); d.className = cls; return d; }
+  function arr(v)   { return Array.isArray(v) ? v : (v ? [v] : []); }
+</script>
+</body>
+</html>
