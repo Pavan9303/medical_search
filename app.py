@@ -28,7 +28,7 @@ def _fetch_tokens_via_browser() -> dict:
             captured["bearer"] = h["authorization"]  # includes "Bearer " prefix
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
         page = browser.new_page()
         page.on("request", on_request)
         page.goto(PORTAL_URL)
@@ -94,9 +94,14 @@ app.add_middleware(
 
 # ─── Static frontend ──────────────────────────────────────────────────────────
 
-@app.get("/", response_class=FileResponse)
+@app.get("/")
 async def serve_frontend():
     return FileResponse("index.html")
+
+@app.head("/")
+async def health_head():
+    from fastapi.responses import Response
+    return Response(status_code=200)
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
