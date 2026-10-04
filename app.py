@@ -1,4 +1,5 @@
 import asyncio
+import os
 import re
 import time
 import threading
@@ -12,6 +13,11 @@ ABDM_BASE    = "https://drugregistrysbx.abdm.gov.in/drug-registry/v1"
 PORTAL_BASE  = "https://drugregistrysbx.abdm.gov.in"
 JS_PATH_RE   = re.compile(r"/dr/v3/static/js/main\.[a-f0-9]+\.js")
 UA           = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
+# Set APIKEY env var on Render to skip the geo-blocked portal HTML fetch.
+# The portal static files return 403 from non-Indian datacenter IPs.
+# The API endpoints (including /uma/sessions) are still accessible.
+_ENV_APIKEY  = os.environ.get("APIKEY", "").strip()
 
 _token: dict = {"bearer": "", "api_key": "", "fetched_at": 0.0}
 _lock = threading.Lock()
@@ -59,28 +65,28 @@ async def _find_js_bundle_path(c: httpx.AsyncClient, h: dict) -> str:
 
 async def _fetch_tokens_via_http() -> dict:
     """
-    1. Locate the portal JS bundle via asset-manifest.json or HTML scraping.
-    2. Extract the hardcoded apikey from the bundle.
-    3. GET /uma/sessions with that apikey → returns accessToken (bearer).
+    1. Get apikey: from APIKEY env var (Render), or by scraping the portal JS bundle.
+    2. GET /uma/sessions with that apikey → returns accessToken (bearer).
     """
     h = {"User-Agent": UA, "Accept": "application/json,text/html,*/*"}
 
     async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=h) as c:
-        js_path = await _find_js_bundle_path(c, h)
-        if not js_path:
-            return {}
+        # Fast path: use env var apikey (set on Render to bypass geo-blocked portal)
+        if _ENV_APIKEY:
+            print("[token] Using APIKEY env var — skipping portal fetch", flush=True)
+            api_key = _ENV_APIKEY
+        else:
+            js_path = await _find_js_bundle_path(c, h)
+            if not js_path:
+                return {}
+            js_text = (await c.get(PORTAL_BASE + js_path)).text
+            key_m = re.search(r'apikey:"([^"]+)"', js_text)
+            if not key_m:
+                print("[token] apikey not found in JS bundle", flush=True)
+                return {}
+            api_key = key_m.group(1)
 
-        js_url = PORTAL_BASE + js_path
-        js_text = (await c.get(js_url)).text
-
-        # Step 2: extract apikey — stored as  apikey:"eyJ..."  in the minified bundle
-        key_m = re.search(r'apikey:"([^"]+)"', js_text)
-        if not key_m:
-            print("[token] apikey not found in JS bundle", flush=True)
-            return {}
-        api_key = key_m.group(1)
-
-        # Step 3: GET /uma/sessions → { "accessToken": "eyJ..." }
+        # GET /uma/sessions → { "accessToken": "eyJ..." }
         sess = await c.get(
             f"{PORTAL_BASE}/drug-registry/v1/uma/sessions",
             headers={**h, "Apikey": api_key},
